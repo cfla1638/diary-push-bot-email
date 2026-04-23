@@ -11,6 +11,7 @@
 - 从多个年份的“今天”中随机选择一篇
 - 通过 SMTP 发送纯文本邮件
 - 支持手动预览、手动发送、内置定时发送
+- 支持在每日时间范围内随机选择一个推送时刻
 
 ## 技术栈
 
@@ -80,7 +81,7 @@ SMTP_PASSWORD=your-smtp-password
 SMTP_SENDER=your-email@example.com
 SMTP_STARTTLS=true
 SMTP_SSL=false
-SEND_TIME=09:00
+PUSH_TIME_RANGE=09:00-11:00
 TIMEZONE=Asia/Shanghai
 ```
 
@@ -95,8 +96,15 @@ TIMEZONE=Asia/Shanghai
 - `SMTP_SENDER`：发件人地址
 - `SMTP_STARTTLS`：是否启用 STARTTLS
 - `SMTP_SSL`：是否使用 SSL
-- `SEND_TIME`：每日发送时间，格式 `HH:MM`
+- `PUSH_TIME_RANGE`：每日推送时间范围，格式 `HH:MM-HH:MM`
 - `TIMEZONE`：时区，默认 `Asia/Shanghai`
+
+### 推送时间范围说明
+
+- 程序会在 `PUSH_TIME_RANGE` 指定的窗口内，为每天选择一个随机发送时刻
+- 同一天内重复运行或重启后，选中的发送时刻保持一致，不会不断重新随机
+- `09:00-09:00` 等价于固定在 09:00 发送
+- 当前只支持同一天内的时间窗口，不支持跨午夜配置，例如 `23:00-01:00`
 
 ### QQ 邮箱示例
 
@@ -112,7 +120,7 @@ SMTP_PASSWORD=your-smtp-auth-code
 SMTP_SENDER=your-qq@qq.com
 SMTP_STARTTLS=false
 SMTP_SSL=true
-SEND_TIME=09:00
+PUSH_TIME_RANGE=09:00-11:00
 TIMEZONE=Asia/Shanghai
 ```
 
@@ -133,7 +141,7 @@ SMTP_PASSWORD=your-password-or-app-password
 SMTP_SENDER=your-outlook@example.com
 SMTP_STARTTLS=true
 SMTP_SSL=false
-SEND_TIME=09:00
+PUSH_TIME_RANGE=09:00-11:00
 TIMEZONE=Asia/Shanghai
 ```
 
@@ -159,7 +167,7 @@ uv run diary-push-bot send-once --env-file .env
 uv run diary-push-bot serve --env-file .env
 ```
 
-程序会常驻运行，并在 `SEND_TIME` 指定的时间发送邮件。
+程序会常驻运行，并在 `PUSH_TIME_RANGE` 指定的时间范围内，为每天选择一个随机推送时刻。
 
 ## 运行逻辑
 
@@ -167,8 +175,9 @@ uv run diary-push-bot serve --env-file .env
 2. 根据当前日期定位所有年份中对应月份的月文件
 3. 在月文件中查找当天的 `## <日期>` 条目
 4. 从候选日记中随机选择一篇
-5. 生成纯文本邮件并发送
-6. 如果没有候选日记，则跳过发送
+5. `serve` 模式下，为当天在配置范围内计算一个稳定随机的发送时刻
+6. 生成纯文本邮件并发送
+7. 如果没有候选日记，则跳过发送
 
 ## 测试
 
@@ -184,11 +193,14 @@ uv run pytest
 - 非规范路径忽略
 - Markdown 图片行保留
 - 无候选时跳过发送
-- 定时执行时间计算
+- 时间范围解析
+- 每日随机发送时刻计算
+- 下一次执行时间计算
 
 ## 当前限制
 
 - 邮件为纯文本，不发送附件或内嵌图片
 - Markdown 图片链接会按原文保留，不会转成附件
 - 内置调度为单进程常驻模式，适合个人使用场景
+- 推送时间范围当前不支持跨午夜
 - Windows 终端下如果出现中文乱码，通常是终端编码问题，不影响邮件逻辑

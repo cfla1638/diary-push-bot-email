@@ -3,8 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import re
 
 from dotenv import load_dotenv
+
+TIME_RANGE_PATTERN = re.compile(r"^\d{2}:\d{2}-\d{2}:\d{2}$")
 
 
 @dataclass(frozen=True)
@@ -18,7 +21,7 @@ class AppConfig:
     smtp_sender: str
     smtp_starttls: bool
     smtp_ssl: bool
-    send_time: str
+    push_time_range: str
     timezone_name: str
 
 
@@ -26,6 +29,13 @@ def _require_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
         raise ValueError(f"Missing required environment variable: {name}")
+    return value
+
+
+def _require_time_range(name: str) -> str:
+    value = _require_env(name)
+    if not TIME_RANGE_PATTERN.fullmatch(value):
+        raise ValueError(f"Invalid time range environment variable {name}: {value}")
     return value
 
 
@@ -64,6 +74,6 @@ def load_config(env_file: str | None = None) -> AppConfig:
         smtp_sender=os.getenv("SMTP_SENDER", "").strip() or _require_env("SMTP_USERNAME"),
         smtp_starttls=smtp_starttls,
         smtp_ssl=smtp_ssl,
-        send_time=_require_env("SEND_TIME"),
+        push_time_range=_require_time_range("PUSH_TIME_RANGE"),
         timezone_name=os.getenv("TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai",
     )

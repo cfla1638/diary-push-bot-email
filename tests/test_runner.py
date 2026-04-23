@@ -3,7 +3,9 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 import random
 
-from diary_push_bot.cli import get_next_run_at, parse_send_time
+import pytest
+
+from diary_push_bot.cli import get_daily_run_at, get_next_run_at, parse_push_time_range
 from diary_push_bot.config import AppConfig
 from diary_push_bot.diary_parser import DiaryParser
 from diary_push_bot.runner import DiaryPushRunner
@@ -15,7 +17,7 @@ def _write(path: Path, content: str) -> None:
     path.write_text(content, encoding="utf-8")
 
 
-def _config(tmp_path: Path) -> AppConfig:
+def _config(tmp_path: Path, push_time_range: str = "09:00-09:00") -> AppConfig:
     return AppConfig(
         diary_root=tmp_path,
         recipient_email="to@example.com",
@@ -26,7 +28,7 @@ def _config(tmp_path: Path) -> AppConfig:
         smtp_sender="sender@example.com",
         smtp_starttls=True,
         smtp_ssl=False,
-        send_time="09:00",
+        push_time_range=push_time_range,
         timezone_name="Asia/Shanghai",
     )
 
@@ -66,14 +68,39 @@ def test_selector_chooses_from_candidates_with_seed(tmp_path: Path) -> None:
     assert entry.body in {"from 2024", "from 2025"}
 
 
-def test_parse_send_time_parses_hour_and_minute(tmp_path: Path) -> None:
-    hour, minute = parse_send_time(_config(tmp_path))
+def test_parse_push_time_range_parses_start_and_end(tmp_path: Path) -> None:
+    start, end = parse_push_time_range(_config(tmp_path, "09:00-11:30"))
 
-    assert (hour, minute) == (9, 0)
+    assert start == (9, 0)
+    assert end == (11, 30)
+
+
+def test_parse_push_time_range_rejects_cross_midnight(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="cross midnight"):
+        parse_push_time_range(_config(tmp_path, "23:00-01:00"))
+
+
+def test_daily_run_at_is_fixed_when_range_start_equals_end(tmp_path: Path) -> None:
+    config = _config(tmp_path, "09:00-09:00")
+
+    run_at = get_daily_run_at(config, date(2026, 4, 23))
+
+    assert run_at == datetime(2026, 4, 23, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+
+def test_daily_run_at_is_stable_for_same_day(tmp_path: Path) -> None:
+    config = _config(tmp_path, "09:00-11:00")
+
+    first = get_daily_run_at(config, date(2026, 4, 23))
+    second = get_daily_run_at(config, date(2026, 4, 23))
+
+    assert first == second
+    assert first.date() == date(2026, 4, 23)
+    assert datetime(2026, 4, 23, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")) <= first <= datetime(2026, 4, 23, 11, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
 def test_get_next_run_at_returns_today_if_future(tmp_path: Path) -> None:
-    config = _config(tmp_path)
+    config = _config(tmp_path, "09:00-09:00")
     current = datetime(2026, 4, 23, 8, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
 
     next_run = get_next_run_at(config, current)
@@ -82,7 +109,7 @@ def test_get_next_run_at_returns_today_if_future(tmp_path: Path) -> None:
 
 
 def test_get_next_run_at_rolls_to_next_day_if_passed(tmp_path: Path) -> None:
-    config = _config(tmp_path)
+    config = _config(tmp_path, "09:00-09:00")
     current = datetime(2026, 4, 23, 9, 0, 1, tzinfo=ZoneInfo("Asia/Shanghai"))
 
     next_run = get_next_run_at(config, current)
