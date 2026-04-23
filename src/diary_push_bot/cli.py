@@ -68,6 +68,14 @@ def _daily_run_at(config: AppConfig, target_date: date) -> datetime:
     return datetime.combine(target_date, dt_time(hour=hour, minute=minute), tzinfo=timezone)
 
 
+def _is_within_push_window(config: AppConfig, current: datetime) -> bool:
+    start, end = _parse_push_time_range(config)
+    start_minutes = start[0] * 60 + start[1]
+    end_minutes = end[0] * 60 + end[1]
+    current_minutes = current.hour * 60 + current.minute
+    return start_minutes <= current_minutes <= end_minutes
+
+
 def _next_run_at(config: AppConfig, current: datetime) -> datetime:
     today_target = _daily_run_at(config, current.date())
     if today_target > current:
@@ -89,11 +97,19 @@ def _print_result(result: RunResult, command: str) -> int:
 
 
 def _serve_once(config: AppConfig, runner: DiaryPushRunner, target_datetime: datetime) -> None:
-    result = runner.send_for_date(target_datetime.date())
-    if result.entry is None:
+    result = runner.send_for_date_once(target_datetime.date(), target_datetime)
+    if result.skipped_as_already_sent:
+        print(f"{target_datetime.date()} 今天已经推送过，跳过。")
+    elif result.entry is None:
         print(f"{target_datetime.date()} 没有可发送的历史日记。")
     else:
         print(f"{target_datetime.date()} 邮件发送成功：{result.entry.source_path}")
+
+
+def _run_startup_catchup(config: AppConfig, runner: DiaryPushRunner, current: datetime) -> None:
+    if not _is_within_push_window(config, current):
+        return
+    _serve_once(config, runner, current)
 
 
 def run_preview_or_send(command: str, env_file: str | None) -> int:
@@ -109,6 +125,8 @@ def run_serve(env_file: str | None) -> int:
     runner = DiaryPushRunner(config)
 
     print(f"调度器已启动，时区：{config.timezone_name}，推送时间范围：{config.push_time_range}")
+    _run_startup_catchup(config, runner, _now(config))
+
     while True:
         current = _now(config)
         next_run = _next_run_at(config, current)
@@ -122,6 +140,10 @@ def serve_once_for_datetime(config: AppConfig, runner: DiaryPushRunner, target_d
     _serve_once(config, runner, target_datetime)
 
 
+def run_startup_catchup(config: AppConfig, runner: DiaryPushRunner, current: datetime) -> None:
+    _run_startup_catchup(config, runner, current)
+
+
 def get_next_run_at(config: AppConfig, current: datetime) -> datetime:
     return _next_run_at(config, current)
 
@@ -132,6 +154,10 @@ def parse_push_time_range(config: AppConfig) -> tuple[tuple[int, int], tuple[int
 
 def get_daily_run_at(config: AppConfig, target_date: date) -> datetime:
     return _daily_run_at(config, target_date)
+
+
+def is_within_push_window(config: AppConfig, current: datetime) -> bool:
+    return _is_within_push_window(config, current)
 
 
 def get_now(config: AppConfig) -> datetime:

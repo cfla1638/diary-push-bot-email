@@ -1,15 +1,17 @@
 from datetime import date, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
+import json
 import random
 
 import pytest
 
-from diary_push_bot.cli import get_daily_run_at, get_next_run_at, parse_push_time_range
+from diary_push_bot.cli import get_daily_run_at, get_next_run_at, is_within_push_window, parse_push_time_range, run_startup_catchup
 from diary_push_bot.config import AppConfig
 from diary_push_bot.diary_parser import DiaryParser
 from diary_push_bot.runner import DiaryPushRunner
 from diary_push_bot.selector import DiarySelector
+from diary_push_bot.state_store import StateStore
 
 
 def _write(path: Path, content: str) -> None:
@@ -30,6 +32,7 @@ def _config(tmp_path: Path, push_time_range: str = "09:00-09:00") -> AppConfig:
         smtp_ssl=False,
         push_time_range=push_time_range,
         timezone_name="Asia/Shanghai",
+        state_file=tmp_path / ".diary_push_state.json",
     )
 
 
@@ -99,6 +102,20 @@ def test_daily_run_at_is_stable_for_same_day(tmp_path: Path) -> None:
     assert datetime(2026, 4, 23, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")) <= first <= datetime(2026, 4, 23, 11, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
 
 
+def test_is_within_push_window_returns_true_inside_range(tmp_path: Path) -> None:
+    config = _config(tmp_path, "09:00-11:00")
+    current = datetime(2026, 4, 23, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    assert is_within_push_window(config, current) is True
+
+
+def test_is_within_push_window_returns_false_outside_range(tmp_path: Path) -> None:
+    config = _config(tmp_path, "09:00-11:00")
+    current = datetime(2026, 4, 23, 8, 59, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    assert is_within_push_window(config, current) is False
+
+
 def test_get_next_run_at_returns_today_if_future(tmp_path: Path) -> None:
     config = _config(tmp_path, "09:00-09:00")
     current = datetime(2026, 4, 23, 8, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
@@ -115,3 +132,105 @@ def test_get_next_run_at_rolls_to_next_day_if_passed(tmp_path: Path) -> None:
     next_run = get_next_run_at(config, current)
 
     assert next_run == datetime(2026, 4, 24, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+
+def test_state_store_marks_sent_date(tmp_path: Path) -> None:
+    _write(tmp_path / "2024" / "2024-04.md", "# 2024 - 4\n\n## 23 星期二\n\nbody\n")
+    entry = DiaryParser(tmp_path).find_entries_for_month_day(date(2026, 4, 23))[0]
+    store = StateStore(tmp_path / ".diary_push_state.json")
+
+    store.mark_sent(date(2026, 4, 23), entry, datetime(2026, 4, 23, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    assert store.has_sent_for_date(date(2026, 4, 23)) is True
+    state = json.loads((tmp_path / ".diary_push_state.json").read_text(encoding="utf-8"))
+    assert "2026-04-23" in state["sent_dates"]
+
+
+def test_send_for_date_once_skips_when_already_sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path / "2024" / "2024-04.md", "# 2024 - 4\n\n## 23 星期二\n\nbody\n")
+    config = _config(tmp_path)
+    runner = DiaryPushRunner(config)
+    runner.state_store.mark_sent(
+        date(2026, 4, 23),
+        runner.parser.find_entries_for_month_day(date(2026, 4, 23))[0],
+        datetime(2026, 4, 23, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+    )
+
+    called = False
+
+    def fake_send(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr("diary_push_bot.runner.send_message", fake_send)
+
+    result = runner.send_for_date_once(date(2026, 4, 23), datetime(2026, 4, 23, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    assert result.sent is False
+    assert result.skipped_as_already_sent is True
+    assert called is False
+
+
+def test_send_for_date_once_marks_state_only_after_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path / "2024" / "2024-04.md", "# 2024 - 4\n\n## 23 星期二\n\nbody\n")
+    config = _config(tmp_path)
+    runner = DiaryPushRunner(config)
+
+    monkeypatch.setattr("diary_push_bot.runner.send_message", lambda *args, **kwargs: None)
+
+    result = runner.send_for_date_once(date(2026, 4, 23), datetime(2026, 4, 23, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    assert result.sent is True
+    assert runner.state_store.has_sent_for_date(date(2026, 4, 23)) is True
+
+
+def test_send_for_date_once_without_candidate_does_not_mark_sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path / "2024" / "2024-04.md", "# 2024 - 4\n\n## 24 星期三\n\nbody\n")
+    config = _config(tmp_path)
+    runner = DiaryPushRunner(config)
+
+    monkeypatch.setattr("diary_push_bot.runner.send_message", lambda *args, **kwargs: None)
+
+    result = runner.send_for_date_once(date(2026, 4, 23), datetime(2026, 4, 23, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    assert result.sent is False
+    assert runner.state_store.has_sent_for_date(date(2026, 4, 23)) is False
+
+
+def test_run_startup_catchup_sends_immediately_inside_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path / "2024" / "2024-04.md", "# 2024 - 4\n\n## 23 星期二\n\nbody\n")
+    config = _config(tmp_path, "09:00-11:00")
+    runner = DiaryPushRunner(config)
+
+    monkeypatch.setattr("diary_push_bot.runner.send_message", lambda *args, **kwargs: None)
+
+    run_startup_catchup(config, runner, datetime(2026, 4, 23, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    assert runner.state_store.has_sent_for_date(date(2026, 4, 23)) is True
+
+
+def test_run_startup_catchup_skips_outside_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path / "2024" / "2024-04.md", "# 2024 - 4\n\n## 23 星期二\n\nbody\n")
+    config = _config(tmp_path, "09:00-11:00")
+    runner = DiaryPushRunner(config)
+
+    monkeypatch.setattr("diary_push_bot.runner.send_message", lambda *args, **kwargs: None)
+
+    run_startup_catchup(config, runner, datetime(2026, 4, 23, 8, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+
+    assert runner.state_store.has_sent_for_date(date(2026, 4, 23)) is False
+
+
+def test_run_startup_catchup_skips_if_already_sent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write(tmp_path / "2024" / "2024-04.md", "# 2024 - 4\n\n## 23 星期二\n\nbody\n")
+    config = _config(tmp_path, "09:00-11:00")
+    runner = DiaryPushRunner(config)
+
+    monkeypatch.setattr("diary_push_bot.runner.send_message", lambda *args, **kwargs: None)
+
+    run_startup_catchup(config, runner, datetime(2026, 4, 23, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")))
+    state_before = (tmp_path / ".diary_push_state.json").read_text(encoding="utf-8")
+    run_startup_catchup(config, runner, datetime(2026, 4, 23, 10, 30, tzinfo=ZoneInfo("Asia/Shanghai")))
+    state_after = (tmp_path / ".diary_push_state.json").read_text(encoding="utf-8")
+
+    assert state_before == state_after

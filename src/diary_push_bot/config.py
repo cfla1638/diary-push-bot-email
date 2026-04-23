@@ -23,6 +23,7 @@ class AppConfig:
     smtp_ssl: bool
     push_time_range: str
     timezone_name: str
+    state_file: Path
 
 
 def _require_env(name: str) -> str:
@@ -64,6 +65,9 @@ def load_config(env_file: str | None = None) -> AppConfig:
     if smtp_ssl and smtp_starttls:
         raise ValueError("SMTP_SSL and SMTP_STARTTLS cannot both be enabled")
 
+    default_state_file = Path(".diary_push_state.json").resolve()
+    state_file = Path(os.getenv("STATE_FILE", "").strip() or default_state_file).expanduser().resolve()
+
     return AppConfig(
         diary_root=diary_root,
         recipient_email=_require_env("RECIPIENT_EMAIL"),
@@ -76,4 +80,5 @@ def load_config(env_file: str | None = None) -> AppConfig:
         smtp_ssl=smtp_ssl,
         push_time_range=_require_time_range("PUSH_TIME_RANGE"),
         timezone_name=os.getenv("TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai",
+        state_file=state_file,
     )
